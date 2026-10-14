@@ -1,8 +1,9 @@
 # LiteLLM 网关 + 自托管 Langfuse v4：经网关的每一次模型调用，请求和响应都会写入 Langfuse。
 #
 # 首次部署请执行 ./deploy.sh（会在 .env 里生成随机密钥）；之后也可以直接用 docker compose 管理。
-# 对宿主机只开放三个端口：LiteLLM、Langfuse、MinIO（浏览器加载媒体文件用），
-# 数据库、ClickHouse、Redis 只在容器网络内可见，不会和机器上已有的服务抢端口。
+# 端口分两组：
+#   应用端口  LiteLLM、Langfuse、MinIO S3 接口，绑定 BIND_ADDRESS（--host 部署时对外开放）
+#   调试端口  PostgreSQL、ClickHouse、Redis、MinIO 控制台，绑定 MIDDLEWARE_BIND_ADDRESS（默认只允许本机）
 #
 #   状态:  docker compose ps            日志:  docker compose logs -f litellm
 #   停止:  docker compose down          （加 -v 会连数据一起删除）
@@ -127,6 +128,9 @@ services:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: clickhouse
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    ports:
+      - ${MIDDLEWARE_BIND_ADDRESS:-127.0.0.1}:${CLICKHOUSE_HTTP_PORT:-8123}:8123
+      - ${MIDDLEWARE_BIND_ADDRESS:-127.0.0.1}:${CLICKHOUSE_NATIVE_PORT:-9000}:9000
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - clickhouse_logs:/var/log/clickhouse-server
@@ -141,12 +145,14 @@ services:
     restart: unless-stopped
     entrypoint: sh
     # 启动前先建好 langfuse 桶
-    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" /data'
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
     environment:
       MINIO_ROOT_USER: minio
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
       - ${BIND_ADDRESS:-127.0.0.1}:${MINIO_PORT:-9090}:9000
+      # 网页控制台
+      - ${MIDDLEWARE_BIND_ADDRESS:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9091}:9001
     volumes:
       - minio_data:/data
     healthcheck:
@@ -164,6 +170,8 @@ services:
     environment:
       # 让健康检查里的 redis-cli 自动带上密码
       REDISCLI_AUTH: ${REDIS_AUTH}
+    ports:
+      - ${MIDDLEWARE_BIND_ADDRESS:-127.0.0.1}:${REDIS_PORT:-6379}:6379
     volumes:
       - redis_data:/data
     healthcheck:
@@ -182,6 +190,8 @@ services:
       POSTGRES_DB: langfuse
       TZ: UTC
       PGTZ: UTC
+    ports:
+      - ${MIDDLEWARE_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro

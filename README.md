@@ -12,6 +12,7 @@
 - [环境要求](#环境要求)
 - [快速开始](#快速开始)
 - [部署后得到什么](#部署后得到什么)
+  - [连进中间件调试](#连进中间件调试)
 - [接入自己的模型](#接入自己的模型)
 - [调用网关](#调用网关)
 - [在 Langfuse 里看日志](#在-langfuse-里看日志)
@@ -49,7 +50,14 @@ Langfuse web (:3000) ──▶ Redis 队列 ──▶ Langfuse worker
 | `redis` | `redis:7.2-alpine` | Langfuse 的任务队列 |
 | `minio` | `cgr.dev/chainguard/minio:latest` | S3 兼容存储，存 Langfuse 收到的原始事件 |
 
-对宿主机只开放 3 个端口：网关 `4000`、Langfuse `3000`、MinIO `9090`。数据库、ClickHouse、Redis 只在容器网络内可见，不会和机器上已有的服务抢端口。
+对宿主机开放的端口分两组：
+
+| 分组 | 端口 | 绑定到 |
+|---|---|---|
+| 应用端口 | 网关 `4000`、Langfuse `3000`、MinIO S3 接口 `9090` | `BIND_ADDRESS`：默认只允许本机，`--host` 部署时对外开放 |
+| 调试端口 | PostgreSQL `5432`、ClickHouse `8123`（HTTP）和 `9000`（原生协议）、Redis `6379`、MinIO 控制台 `9091` | `MIDDLEWARE_BIND_ADDRESS`：默认只允许本机，`--host` 不会改它 |
+
+调试端口方便直接连进各个中间件排查问题。第一次部署时如果某个标准端口已被机器上的其他服务占用（比如已经装了 PostgreSQL），会自动改用加 10000 的端口（如 `15432`），实际端口以 `CREDENTIALS.md` 为准。
 
 ## 环境要求
 
@@ -57,7 +65,7 @@ Langfuse web (:3000) ──▶ Redis 队列 ──▶ Langfuse worker
 - 分配给 Docker 的内存**不少于 6 GB**：整套空载时实测占用约 4.8 GB
 - 磁盘：7 个镜像在本机共占用约 6.7 GB
 - `bash` 和 `curl`（自检用）
-- 端口 `3000`、`4000`、`9090` 空闲；被占用时可以换，见[配置项](#配置项)
+- 应用端口 `3000`、`4000`、`9090` 空闲；被占用时可以换，见[配置项](#配置项)。调试端口被占用时会自动避让
 - 能访问 Docker Hub、`docker.litellm.ai`、`cgr.dev` 拉取镜像；访问不了时见[排错](#排错)
 
 ## 快速开始
@@ -95,7 +103,7 @@ cd litellm-langfuse
 ./deploy.sh --host 10.0.0.5
 ```
 
-这会把 3 个端口改为对所有网卡开放，并把 Langfuse 的登录跳转地址、`CREDENTIALS.md` 里的地址都换成 `http://10.0.0.5:...`。已经部署过的也可以直接加 `--host` 重新执行，密码不会变。
+这会把 3 个应用端口改为对所有网卡开放（调试端口仍只允许本机，见[连进中间件调试](#连进中间件调试)），并把 Langfuse 的登录跳转地址、`CREDENTIALS.md` 里的地址都换成 `http://10.0.0.5:...`。已经部署过的也可以直接加 `--host` 重新执行，密码不会变。
 
 `deploy.sh` 可以重复执行：已有的 `.env` 会被沿用，不会重新生成密码。
 
@@ -107,7 +115,20 @@ cd litellm-langfuse
 | `http://<地址>:4000/v1` | **网关 API**（OpenAI 兼容） | `Authorization: Bearer <key>` |
 | `http://<地址>:4000/ui` | 网关管理界面：添加模型、发放 key、看用量费用 | 用户名 `admin` + Master Key |
 
-所有账号、密码、密钥都在部署目录下的 **`CREDENTIALS.md`** 里，包括内部组件（PostgreSQL、ClickHouse、Redis、MinIO）的密码和进入方式。这个文件和 `.env` 权限都是 600，并且已在 `.gitignore` 里忽略。
+所有账号、密码、密钥都在部署目录下的 **`CREDENTIALS.md`** 里，包括四个中间件（PostgreSQL、ClickHouse、Redis、MinIO）的地址、端口、用户名、密码、连接串和进入命令。这个文件和 `.env` 权限都是 600，并且已在 `.gitignore` 里忽略。
+
+### 连进中间件调试
+
+| 中间件 | 默认地址 | 用户名 | 存的是什么 |
+|---|---|---|---|
+| PostgreSQL | `127.0.0.1:5432` | `postgres` | 库 `litellm`：网关的 key、模型、用量、请求日志；库 `langfuse`：Langfuse 的账号、项目、API Key |
+| ClickHouse | `127.0.0.1:8123`（HTTP）、`127.0.0.1:9000`（原生协议） | `clickhouse` | Langfuse 的日志正文，全文在 `events_full` 表 |
+| Redis | `127.0.0.1:6379` | （无） | Langfuse 的任务队列 |
+| MinIO | 控制台 `http://127.0.0.1:9091`，S3 接口 `http://127.0.0.1:9090` | `minio` | Langfuse 收到的原始事件和媒体文件 |
+
+密码、连接串和现成的命令都在 `CREDENTIALS.md` 里。本机没装客户端时，也可以用 `docker compose exec postgres psql -U postgres -d litellm` 这类命令直接进容器。
+
+**在服务器上部署、从自己电脑调试**：调试端口默认只允许服务器本机连接，用 SSH 隧道转到自己电脑上最安全，`CREDENTIALS.md` 末尾有写好的命令。确实需要直接开放时，把 `.env` 里的 `MIDDLEWARE_BIND_ADDRESS` 改成 `0.0.0.0` 再执行 `./deploy.sh`，并用防火墙只放行可信的机器。
 
 ## 接入自己的模型
 
@@ -226,6 +247,11 @@ curl -u "$LANGFUSE_INIT_PROJECT_PUBLIC_KEY:$LANGFUSE_INIT_PROJECT_SECRET_KEY" \
 | `LITELLM_PORT` | `4000` | 网关端口 |
 | `LANGFUSE_PORT` | `3000` | Langfuse 端口 |
 | `MINIO_PORT` | `9090` | MinIO 端口（浏览器加载 Langfuse 里的媒体文件用） |
+| `MIDDLEWARE_BIND_ADDRESS` | `127.0.0.1` | 调试端口绑定到哪个网卡；改成 `0.0.0.0` 允许其他机器直连中间件 |
+| `POSTGRES_PORT` | `5432` | PostgreSQL 调试端口 |
+| `CLICKHOUSE_HTTP_PORT` / `CLICKHOUSE_NATIVE_PORT` | `8123` / `9000` | ClickHouse 调试端口 |
+| `REDIS_PORT` | `6379` | Redis 调试端口 |
+| `MINIO_CONSOLE_PORT` | `9091` | MinIO 网页控制台 |
 | `COMPOSE_PROJECT_NAME` | `llm-gateway` | 容器和数据卷的名字前缀；同一台机器部署多套时，每套用不同的值和端口 |
 | `*_IMAGE` | 见 `.env.example` | 替换镜像地址，用于镜像加速或内网仓库 |
 
@@ -272,7 +298,8 @@ rm .env CREDENTIALS.md
 ## 安全说明
 
 - `.env` 和 `CREDENTIALS.md` 含明文密钥，已在 `.gitignore` 里忽略，不要提交、不要外发。
-- 默认只监听 `127.0.0.1`。用 `--host` 对外开放后，3 个端口对所有网卡开放，请配合防火墙只放行需要访问的机器；正式环境建议在前面加 HTTPS 反向代理。
+- 默认所有端口只监听 `127.0.0.1`。用 `--host` 对外开放后，3 个应用端口对所有网卡开放，请配合防火墙只放行需要访问的机器；正式环境建议在前面加 HTTPS 反向代理。
+- 调试端口能直接读写全部数据，不要对公网开放；远程调试优先用 SSH 隧道。
 - **Langfuse 里存的是请求和响应全文**，能登录 Langfuse 的人都能看到业务数据。
 - Master Key 权限最大，只留给管理员。
 - 已关闭 Langfuse 向官方上报匿名使用统计（`TELEMETRY_ENABLED=false`）。
@@ -290,7 +317,7 @@ rm .env CREDENTIALS.md
 - 端口被占用时给出明确提示并停止
 - 内置模拟模型、经管理接口添加的真实模型（DeepSeek），请求和响应都正确写入 Langfuse
 - `CREDENTIALS.md` 中每一组账号密码都能登录，错误密码被拒
-- 内部组件端口确实没有对宿主机开放
+- 四个中间件都能用 `CREDENTIALS.md` 里的地址和密码从宿主机连上，错误密码被拒；标准端口被占用时自动避让
 - `--host` 部署：端口改为对外开放，经局域网 IP 能访问和登录
 - 重复执行 `deploy.sh` 不会改动已有的 `.env`
 
