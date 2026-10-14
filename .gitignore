@@ -1,0 +1,5 @@
+# 部署时生成，含明文密钥
+.env
+CREDENTIALS.md
+
+.DS_Store

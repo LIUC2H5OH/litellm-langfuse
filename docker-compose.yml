@@ -1,0 +1,200 @@
+# LiteLLM 网关 + 自托管 Langfuse v4：经网关的每一次模型调用，请求和响应都会写入 Langfuse。
+#
+# 首次部署请执行 ./deploy.sh（会在 .env 里生成随机密钥）；之后也可以直接用 docker compose 管理。
+# 对宿主机只开放三个端口：LiteLLM、Langfuse、MinIO（浏览器加载媒体文件用），
+# 数据库、ClickHouse、Redis 只在容器网络内可见，不会和机器上已有的服务抢端口。
+#
+#   状态:  docker compose ps            日志:  docker compose logs -f litellm
+#   停止:  docker compose down          （加 -v 会连数据一起删除）
+
+x-langfuse-env: &langfuse-env
+  NEXTAUTH_URL: http://${PUBLIC_HOST:-localhost}:${LANGFUSE_PORT:-3000}
+  DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/langfuse
+  SALT: ${LANGFUSE_SALT}
+  ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+  TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-false}
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_AUTH: ${REDIS_AUTH}
+
+x-langfuse-depends-on: &langfuse-depends-on
+  postgres:
+    condition: service_healthy
+  clickhouse:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  minio:
+    condition: service_healthy
+
+services:
+  # ---------------------------------------------------------------- LiteLLM
+  litellm:
+    image: ${LITELLM_IMAGE:-docker.litellm.ai/berriai/litellm:v1.96.2}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # 等 Langfuse 就绪再起网关，避免最早的几条日志发不出去
+      langfuse-web:
+        condition: service_healthy
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:${LITELLM_PORT:-4000}:4000
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/litellm
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY}
+      # 允许在管理界面里添加模型（存进数据库，用 LITELLM_SALT_KEY 加密）
+      STORE_MODEL_IN_DB: "True"
+      # langfuse_otel 回调用的项目 API Key，和 Langfuse 首次启动时预置的那一对相同
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY}
+      LANGFUSE_OTEL_HOST: http://langfuse-web:3000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  # --------------------------------------------------------------- Langfuse
+  langfuse-web:
+    image: ${LANGFUSE_IMAGE:-langfuse/langfuse:4.55.0}
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:${LANGFUSE_PORT:-3000}:3000
+    environment:
+      <<: *langfuse-env
+      # Next.js 默认只监听容器主机名对应的地址，改成 0.0.0.0 才能在容器内用 127.0.0.1 做健康检查
+      HOSTNAME: 0.0.0.0
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      # 浏览器加载媒体文件用的地址（访问者视角），容器内部仍走 minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://${PUBLIC_HOST:-localhost}:${MINIO_PORT:-9090}
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://minio:9000
+      # 首次启动时自动创建组织、项目、管理员账号和项目 API Key（库里已有就不再创建）
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/public/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      # 首次启动要跑 Postgres 和 ClickHouse 的迁移，给足时间
+      start_period: 300s
+
+  langfuse-worker:
+    image: ${LANGFUSE_WORKER_IMAGE:-langfuse/langfuse-worker:4.55.0}
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
+    environment:
+      <<: *langfuse-env
+
+  clickhouse:
+    image: ${CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:25.12}
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: ${MINIO_IMAGE:-cgr.dev/chainguard/minio:latest}
+    restart: unless-stopped
+    entrypoint: sh
+    # 启动前先建好 langfuse 桶
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:${MINIO_PORT:-9090}:9000
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7.2-alpine}
+    restart: unless-stopped
+    command: >
+      --requirepass ${REDIS_AUTH}
+      --maxmemory-policy noeviction
+    environment:
+      # 让健康检查里的 redis-cli 自动带上密码
+      REDISCLI_AUTH: ${REDIS_AUTH}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  # 一个实例两个库：langfuse（POSTGRES_DB 创建）与 litellm（init 脚本创建）
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: langfuse
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # 走 TCP 检查：首次初始化阶段的临时实例只监听 unix socket，这样能等到 init 脚本跑完
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+  clickhouse_logs:
+  minio_data:
+  redis_data:

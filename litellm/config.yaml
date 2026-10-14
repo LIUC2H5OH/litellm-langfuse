@@ -1,0 +1,21 @@
+# 添加真实模型有两种方式：
+#   1. 管理界面 http://<地址>:4000/ui → Models + Endpoints → Add Model（存进数据库，不用重启）
+#   2. 在下面 model_list 里照格式加一段，然后执行 docker compose restart litellm
+model_list:
+  # 内置的模拟模型：不连接任何外部服务，固定返回一句话，只用来验证"网关 → Langfuse"日志链路。
+  # 接好真实模型后可以删掉这一段。
+  - model_name: mock-model
+    litellm_params:
+      model: openai/mock-model
+      api_key: not-needed
+      mock_response: "LiteLLM to Langfuse pipeline OK"
+
+litellm_settings:
+  # 每次调用结束后，把请求和响应通过 OpenTelemetry 发给 Langfuse
+  # （读取环境变量 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_OTEL_HOST）。
+  # 注意不要开 turn_off_message_logging：它会把发往 Langfuse 的正文也一并抹掉。
+  callbacks: ["langfuse_otel"]
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
