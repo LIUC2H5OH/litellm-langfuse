@@ -161,7 +161,15 @@ fi
 
 # ------------------------------------------------------------------ 启动
 info "拉取镜像（第一次需要几分钟，取决于网络）"
-docker compose pull --quiet || die "镜像拉取失败。网络受限时，可以在 .env 里用 *_IMAGE 变量换成可访问的镜像地址（见 README）"
+if ! docker compose pull --quiet; then
+  # 网络波动时拉取会失败；本机已经有全部镜像（比如重复部署）就继续用本地的
+  missing=""
+  for img in $(docker compose config --images); do
+    docker image inspect "$img" >/dev/null 2>&1 || missing="${missing} ${img}"
+  done
+  [ -z "$missing" ] || die "镜像拉取失败，本机也没有这些镜像:${missing}。网络受限时，可以在 .env 里用 *_IMAGE 变量换成可访问的镜像地址（见 README）"
+  warn "镜像拉取失败（可能是网络波动），本机已有全部所需镜像，继续使用本地镜像"
+fi
 
 info "启动服务并等待全部就绪（第一次要初始化数据库，通常 1 到 3 分钟）"
 if ! docker compose up -d --wait; then
