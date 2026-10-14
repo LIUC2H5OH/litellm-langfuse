@@ -16,7 +16,8 @@ litellm_settings:
   # 注意不要开 turn_off_message_logging：它会把发往 Langfuse 的正文也一并抹掉。
   # langfuse_reasoning（同目录的 langfuse_reasoning.py）把模型的思维链补进 Langfuse 的输出，
   # 原生的 langfuse_otel 会丢掉它。开关是 .env 里的 LANGFUSE_LOG_REASONING，这一项保持登记即可。
-  callbacks: ["langfuse_otel", "langfuse_reasoning.reasoning_logger"]
+  # langfuse_raw_payload（同目录的 langfuse_raw_payload.py）把原始请求和响应 JSON 原样附加到 Langfuse，开关是 .env 里的 LANGFUSE_LOG_RAW_PAYLOAD（默认关闭）。
+  callbacks: ["langfuse_otel", "langfuse_reasoning.reasoning_logger", "langfuse_raw_payload.raw_payload_logger"]
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

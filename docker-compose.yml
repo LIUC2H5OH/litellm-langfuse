@@ -65,6 +65,8 @@ services:
       - ./litellm/config.yaml:/app/config.yaml:ro
       # 把思维链补进 Langfuse 输出的补丁，在 config.yaml 的 callbacks 里登记
       - ./litellm/langfuse_reasoning.py:/app/langfuse_reasoning.py:ro
+      # 把原始请求和响应 JSON 原样附加到 Langfuse 的补丁
+      - ./litellm/langfuse_raw_payload.py:/app/langfuse_raw_payload.py:ro
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/litellm
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
@@ -77,6 +79,8 @@ services:
       LANGFUSE_OTEL_HOST: http://langfuse-web:3000
       # 是否把模型的思维链写进 Langfuse 输出（litellm/langfuse_reasoning.py），在 .env 里改
       LANGFUSE_LOG_REASONING: ${LANGFUSE_LOG_REASONING:-true}
+      # 是否把原始请求和响应 JSON 原样附加到 Langfuse（litellm/langfuse_raw_payload.py），在 .env 里改
+      LANGFUSE_LOG_RAW_PAYLOAD: ${LANGFUSE_LOG_RAW_PAYLOAD:-false}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=3)"]
       interval: 10s

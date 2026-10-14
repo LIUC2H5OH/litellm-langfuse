@@ -17,6 +17,7 @@
 - [调用网关](#调用网关)
 - [在 Langfuse 里看日志](#在-langfuse-里看日志)
 - [思维链](#思维链)
+- [原始请求和响应 JSON](#原始请求和响应-json)
 - [对接是怎么实现的](#对接是怎么实现的)
 - [配置项](#配置项)
 - [运维](#运维)
@@ -268,11 +269,34 @@ LIMIT 10
 
 补丁依赖 LiteLLM 的一个内部函数（在 v1.96.2 上验证），**升级 LiteLLM 镜像后请重新验证**。补丁写入失败时只会在网关日志里留一条告警，不影响原有日志。
 
+## 原始请求和响应 JSON
+
+Langfuse 的 `input` / `output` 是整理过的内容：LiteLLM 内部的很多字段（`user_api_key_auth`、`hidden_params` 等）和响应里的 `finish_reason`、`created`、`system_fingerprint` 都不会保存。需要原样留存时，打开补丁 [litellm/langfuse_raw_payload.py](litellm/langfuse_raw_payload.py)，**默认关闭**。
+
+- **开关**：`.env` 里的 `LANGFUSE_LOG_RAW_PAYLOAD`，改成 `true` 后重新执行 `./deploy.sh`。
+- **存在哪**：每条记录的元数据里，键名为 `attributes.litellm.raw_request` 和 `attributes.litellm.raw_response`，Langfuse 界面上在 Metadata 区域可以逐层展开。
+- **内容**：与网关管理界面 Logs 页 Request、Response 页签的数据同源；流式请求的原始响应是拼好的完整响应，失败的请求只有原始请求。
+- **不截断**：网关自己的日志会把超过 2048 字符的字段截断，这里不会；也不受网关“存储请求和响应”开关的影响。开了网关的消息脱敏时不写入。
+
+在 ClickHouse 里取出来：
+
+```sql
+SELECT start_time,
+       metadata_values[indexOf(metadata_names, 'attributes.litellm.raw_request')]  AS raw_request,
+       metadata_values[indexOf(metadata_names, 'attributes.litellm.raw_response')] AS raw_response
+FROM events_full
+WHERE name = 'litellm_request'
+ORDER BY start_time DESC
+LIMIT 10
+```
+
+**为什么默认关闭**：原始请求里有完整的请求头和 key 的鉴权信息，从浏览器（Playground）发起的请求还会带 cookie，包括网关和 Langfuse 的登录令牌，能登录 Langfuse 的人都能看到；每条记录也会多占几 KB 到几十 KB。网关 key 的明文和 `Authorization` 请求头不会出现（实测）。开关打开后执行 `scripts/verify.sh` 会顺带检查这两项是否写入。
+
 ## 对接是怎么实现的
 
 关键就两处：
 
-1. [litellm/config.yaml](litellm/config.yaml) 里开启回调 `langfuse_otel`，网关每次调用结束后把请求和响应通过 OpenTelemetry 发给 Langfuse。同一行登记的 `langfuse_reasoning` 是补思维链的补丁，见[思维链](#思维链)。
+1. [litellm/config.yaml](litellm/config.yaml) 里开启回调 `langfuse_otel`，网关每次调用结束后把请求和响应通过 OpenTelemetry 发给 Langfuse。同一行登记的 `langfuse_reasoning` 是补思维链的补丁，见[思维链](#思维链)；`langfuse_raw_payload` 是附加原始报文的补丁，见[原始请求和响应 JSON](#原始请求和响应-json)。
 2. [docker-compose.yml](docker-compose.yml) 里给 `litellm` 服务配好 `LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`、`LANGFUSE_OTEL_HOST`。
 
 这对 Langfuse API Key 不用手动去界面创建：Langfuse 首次启动时按 `.env` 里的 `LANGFUSE_INIT_*` 自动创建组织、项目、管理员和这对 key，网关直接用同一对。
@@ -296,6 +320,7 @@ LIMIT 10
 | `REDIS_PORT` | `6379` | Redis 调试端口 |
 | `MINIO_CONSOLE_PORT` | `9091` | MinIO 网页控制台 |
 | `LANGFUSE_LOG_REASONING` | `true` | 是否把模型的思维链写进 Langfuse 输出，见[思维链](#思维链) |
+| `LANGFUSE_LOG_RAW_PAYLOAD` | `false` | 是否把原始请求和响应 JSON 原样附加到 Langfuse，见[原始请求和响应 JSON](#原始请求和响应-json) |
 | `COMPOSE_PROJECT_NAME` | `llm-gateway` | 容器和数据卷的名字前缀；同一台机器部署多套时，每套用不同的值和端口 |
 | `*_IMAGE` | 见 `.env.example` | 替换镜像地址，用于镜像加速或内网仓库 |
 
@@ -366,5 +391,6 @@ rm .env CREDENTIALS.md
 - `--host` 部署：端口改为对外开放，经局域网 IP 能访问和登录
 - 重复执行 `deploy.sh` 不会改动已有的 `.env`
 - 思维链开关：开启时非流式、流式请求的思维链都写进 Langfuse 输出，关闭时都不写；从旧版本升级时自动补上开关
+- 原始报文开关：默认关闭；打开后原始请求和响应原样附加到 Langfuse，自检脚本能确认写入；从旧版本升级时自动补上开关（默认关闭）
 
 **Linux 服务器上尚未实测。**脚本只用了 bash、curl、awk、openssl（没有时退回 `/dev/urandom`）这些常见工具，按理可以直接运行；第一次在 Linux 上部署时请留意输出。

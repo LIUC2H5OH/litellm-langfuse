@@ -92,5 +92,19 @@ case "$(printf '%s' "${LANGFUSE_LOG_REASONING:-true}" | tr '[:upper:]' '[:lower:
     ;;
 esac
 
+# 原始请求和响应：开关开着时检查两项都已附加到 Langfuse
+case "$(printf '%s' "${LANGFUSE_LOG_RAW_PAYLOAD:-false}" | tr '[:upper:]' '[:lower:]')" in
+  true | 1 | yes | on)
+    meta=$(curl -s --max-time 15 -u "$LF_AUTH" \
+      "${LANGFUSE}/api/public/v2/observations?traceId=${trace_id}&type=GENERATION&fields=core,metadata" || true)
+    grep -q 'litellm.raw_request' <<<"$meta" && grep -q 'litellm.raw_response' <<<"$meta" ||
+      fail "开关已开启，但 Langfuse 里没有原始请求或响应（检查 litellm 启动日志里的 langfuse_raw_payload 一行）"
+    ok "原始请求和响应 JSON 已附加到 Langfuse"
+    ;;
+  *)
+    printf '[--]   原始报文写入未开启（LANGFUSE_LOG_RAW_PAYLOAD=false），跳过检查\n'
+    ;;
+esac
+
 printf '\n全部通过。在界面里查看这条记录:\n  http://%s:%s/project/%s/traces/%s\n' \
   "${PUBLIC_HOST:-localhost}" "${LANGFUSE_PORT:-3000}" "${LANGFUSE_INIT_PROJECT_ID}" "$trace_id"
