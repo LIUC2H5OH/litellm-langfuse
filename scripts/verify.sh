@@ -77,5 +77,20 @@ ok "Langfuse 中找到了这次调用"
 grep -q '"output":null' <<<"$obs" && fail "Langfuse 里这次调用的响应正文为空"
 ok "请求和响应正文都已写入 Langfuse"
 
+# 思维链：只有模型确实返回了思维链、且开关开着时才检查（内置模拟模型没有思维链）
+case "$(printf '%s' "${LANGFUSE_LOG_REASONING:-true}" | tr '[:upper:]' '[:lower:]')" in
+  false | 0 | no | off)
+    printf '[--]   思维链写入已关闭（LANGFUSE_LOG_REASONING=false），跳过思维链检查\n'
+    ;;
+  *)
+    if grep -Eq '"reasoning_content": ?"[^"]' <<<"$resp"; then
+      grep -q 'thinking' <<<"$obs" || fail "模型返回了思维链，但 Langfuse 输出里没有（检查 litellm 启动日志里的 langfuse_reasoning 一行）"
+      ok "思维链已写入 Langfuse 输出"
+    else
+      printf '[--]   模型没有返回思维链，跳过思维链检查\n'
+    fi
+    ;;
+esac
+
 printf '\n全部通过。在界面里查看这条记录:\n  http://%s:%s/project/%s/traces/%s\n' \
   "${PUBLIC_HOST:-localhost}" "${LANGFUSE_PORT:-3000}" "${LANGFUSE_INIT_PROJECT_ID}" "$trace_id"

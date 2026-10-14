@@ -16,6 +16,7 @@
 - [接入自己的模型](#接入自己的模型)
 - [调用网关](#调用网关)
 - [在 Langfuse 里看日志](#在-langfuse-里看日志)
+- [思维链](#思维链)
 - [对接是怎么实现的](#对接是怎么实现的)
 - [配置项](#配置项)
 - [运维](#运维)
@@ -165,8 +166,10 @@ scripts/verify.sh deepseek-flash
 先把 `.env` 读进当前 shell，避免把密钥贴进命令里：
 
 ```bash
-set -a; source .env; set +a
+source .env
 ```
+
+不要写成 `set -a; source .env`：那样会把变量导出到环境里，之后再改 `.env` 时，在这个终端里执行的 `docker compose` 会沿用旧值。
 
 ```bash
 curl http://localhost:4000/v1/chat/completions \
@@ -225,11 +228,51 @@ curl -u "$LANGFUSE_INIT_PROJECT_PUBLIC_KEY:$LANGFUSE_INIT_PROJECT_SECRET_KEY" \
   "http://localhost:3000/api/public/v2/observations?type=GENERATION&limit=20&fields=core,basic,io,usage"
 ```
 
+## 思维链
+
+DeepSeek 这类思考型模型会返回思维链（`reasoning_content`），但 LiteLLM 原生的 Langfuse 上报会把它丢掉，只记录最终回答（社区问题 [BerriAI/litellm#44520](https://github.com/BerriAI/litellm/issues/44520)，尚未修复）。本项目用一个补丁 [litellm/langfuse_reasoning.py](litellm/langfuse_reasoning.py) 把它补回来，**默认开启**。
+
+开启后，思维链按 Langfuse 官方的消息格式写进输出，界面上显示为回答上方可折叠的 **Thinking** 区块；`content` 仍是普通文本：
+
+```json
+{"role": "assistant", "content": "回答", "thinking": [{"type": "thinking", "content": "思维链"}]}
+```
+
+非流式、流式（包括网关管理界面的 Playground）、模型调用了工具，这三种情况都会写入；调用了工具时，输出同时带 `thinking` 和 `tool_calls`，界面上两者都显示。
+
+**开关**：`.env` 里的 `LANGFUSE_LOG_REASONING`，`true` 开启，`false` 关闭（关闭时与原生 LiteLLM 完全一致）。改完重新执行 `./deploy.sh` 生效，只会重建网关一个容器，密码和数据都不变：
+
+```bash
+./deploy.sh
+```
+
+当前状态可以在启动日志里确认：
+
+```bash
+docker compose logs litellm | grep langfuse_reasoning
+```
+
+在 ClickHouse 里查思维链（连接方式见 `CREDENTIALS.md`）：
+
+```sql
+SELECT start_time,
+       JSONExtractString(output, 'content')                AS answer,
+       JSONExtractString(output, 'thinking', 1, 'content') AS reasoning
+FROM events_full
+WHERE name = 'litellm_request'
+ORDER BY start_time DESC
+LIMIT 10
+```
+
+用真实的思考型模型执行 `scripts/verify.sh <模型名>`，会顺带检查思维链是否写进了 Langfuse。
+
+补丁依赖 LiteLLM 的一个内部函数（在 v1.96.2 上验证），**升级 LiteLLM 镜像后请重新验证**。补丁写入失败时只会在网关日志里留一条告警，不影响原有日志。
+
 ## 对接是怎么实现的
 
 关键就两处：
 
-1. [litellm/config.yaml](litellm/config.yaml) 里开启回调 `callbacks: ["langfuse_otel"]`，网关每次调用结束后把请求和响应通过 OpenTelemetry 发给 Langfuse。
+1. [litellm/config.yaml](litellm/config.yaml) 里开启回调 `langfuse_otel`，网关每次调用结束后把请求和响应通过 OpenTelemetry 发给 Langfuse。同一行登记的 `langfuse_reasoning` 是补思维链的补丁，见[思维链](#思维链)。
 2. [docker-compose.yml](docker-compose.yml) 里给 `litellm` 服务配好 `LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`、`LANGFUSE_OTEL_HOST`。
 
 这对 Langfuse API Key 不用手动去界面创建：Langfuse 首次启动时按 `.env` 里的 `LANGFUSE_INIT_*` 自动创建组织、项目、管理员和这对 key，网关直接用同一对。
@@ -252,6 +295,7 @@ curl -u "$LANGFUSE_INIT_PROJECT_PUBLIC_KEY:$LANGFUSE_INIT_PROJECT_SECRET_KEY" \
 | `CLICKHOUSE_HTTP_PORT` / `CLICKHOUSE_NATIVE_PORT` | `8123` / `9000` | ClickHouse 调试端口 |
 | `REDIS_PORT` | `6379` | Redis 调试端口 |
 | `MINIO_CONSOLE_PORT` | `9091` | MinIO 网页控制台 |
+| `LANGFUSE_LOG_REASONING` | `true` | 是否把模型的思维链写进 Langfuse 输出，见[思维链](#思维链) |
 | `COMPOSE_PROJECT_NAME` | `llm-gateway` | 容器和数据卷的名字前缀；同一台机器部署多套时，每套用不同的值和端口 |
 | `*_IMAGE` | 见 `.env.example` | 替换镜像地址，用于镜像加速或内网仓库 |
 
@@ -293,6 +337,7 @@ rm .env CREDENTIALS.md
 | Langfuse 里看不到刚才的调用 | 等几秒再刷新，并检查右上角时间范围；仍没有就执行 `scripts/verify.sh` 看卡在哪一步 |
 | 调 `/api/public/traces` 返回 404 | Langfuse v4 已下线该接口，改用 `/api/public/v2/observations` |
 | 想改 Langfuse 登录密码 | 界面里改密码需要邮件验证码，本部署没有配置邮件服务。测试环境可按上面的方法彻底重置 |
+| 改了 `.env` 但没生效 | 当前终端里可能导出过旧值（比如执行过 `set -a; source .env`），Docker Compose 会优先用终端里的值。用 `./deploy.sh` 应用改动，它每次都会重新读取 `.env`；或者换一个新终端再执行 `docker compose` |
 | 改了 `.env` 里的数据库密码后连不上 | 这些密码只在数据第一次初始化时写入，改密码需要重置，见 `CREDENTIALS.md` 的“改密码须知” |
 
 ## 安全说明
@@ -306,7 +351,7 @@ rm .env CREDENTIALS.md
 
 ### 已知限制
 
-- 流式请求的模型思考过程（`reasoning_content`）不会被记录进 Langfuse，只记录最终回答；这是 LiteLLM 上报代码的限制。
+- 思维链补丁依赖 LiteLLM 内部函数，升级 LiteLLM 后需要重新验证；开启补丁之前产生的历史记录里没有思维链。
 - Langfuse 里显示的费用是 LiteLLM 按内置价格表估算的美元金额，对账请以服务商账单为准。
 
 ## 测试情况
@@ -320,5 +365,6 @@ rm .env CREDENTIALS.md
 - 四个中间件都能用 `CREDENTIALS.md` 里的地址和密码从宿主机连上，错误密码被拒；标准端口被占用时自动避让
 - `--host` 部署：端口改为对外开放，经局域网 IP 能访问和登录
 - 重复执行 `deploy.sh` 不会改动已有的 `.env`
+- 思维链开关：开启时非流式、流式请求的思维链都写进 Langfuse 输出，关闭时都不写；从旧版本升级时自动补上开关
 
 **Linux 服务器上尚未实测。**脚本只用了 bash、curl、awk、openssl（没有时退回 `/dev/urandom`）这些常见工具，按理可以直接运行；第一次在 Linux 上部署时请留意输出。

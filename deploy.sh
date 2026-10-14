@@ -79,6 +79,12 @@ ensure_middleware_ports() {
   done
 }
 
+# 给 .env 补上功能开关：首次部署时生成，从旧版本升级时补齐
+ensure_feature_switches() {
+  grep -q '^LANGFUSE_LOG_REASONING=' .env ||
+    printf '\n# ---------- 功能开关 ----------\n# 是否把模型的思维链（reasoning_content）写进 Langfuse 的输出：true 开启，false 关闭。\n# 改完重新执行 ./deploy.sh 生效。\nLANGFUSE_LOG_REASONING=true\n' >>.env
+}
+
 # ------------------------------------------------------------------ 生成 .env
 if [ ! -f .env ]; then
   info "首次部署：生成随机密钥，写入 .env"
@@ -130,6 +136,7 @@ else
   info "沿用已有的 .env"
 fi
 ensure_middleware_ports
+ensure_feature_switches
 
 set -a
 # shellcheck disable=SC1091
@@ -331,6 +338,7 @@ cat <<EOF
   网关 API:         ${GATEWAY_URL}/v1
   网关管理界面:     ${GATEWAY_URL}/ui
   中间件调试端口:   PostgreSQL ${POSTGRES_PORT}、ClickHouse ${CLICKHOUSE_HTTP_PORT}/${CLICKHOUSE_NATIVE_PORT}、Redis ${REDIS_PORT}、MinIO 控制台 ${MINIO_CONSOLE_PORT}
+  思维链写入 Langfuse: ${LANGFUSE_LOG_REASONING}（.env 里的 LANGFUSE_LOG_REASONING）
   账号密码:         $(pwd)/CREDENTIALS.md
 
 下一步：在网关管理界面 Models + Endpoints 里添加你自己的模型，之后经网关的调用都会出现在 Langfuse 里。

@@ -14,7 +14,9 @@ litellm_settings:
   # 每次调用结束后，把请求和响应通过 OpenTelemetry 发给 Langfuse
   # （读取环境变量 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_OTEL_HOST）。
   # 注意不要开 turn_off_message_logging：它会把发往 Langfuse 的正文也一并抹掉。
-  callbacks: ["langfuse_otel"]
+  # langfuse_reasoning（同目录的 langfuse_reasoning.py）把模型的思维链补进 Langfuse 的输出，
+  # 原生的 langfuse_otel 会丢掉它。开关是 .env 里的 LANGFUSE_LOG_REASONING，这一项保持登记即可。
+  callbacks: ["langfuse_otel", "langfuse_reasoning.reasoning_logger"]
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
