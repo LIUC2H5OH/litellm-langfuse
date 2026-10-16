@@ -220,6 +220,10 @@ print(resp.choices[0].message.content)
 | `litellm_request` | GENERATION | Input 是请求的 messages 全文，Output 是模型的回答；还有模型名、参数、token 用量、费用、耗时、用户、会话、标签 |
 | `raw_gen_ai_request` | SPAN（上一条的子节点） | 网关与上游模型服务之间的原始报文，在 Attributes 页签的 Metadata 里 |
 
+子记录里是网关按服务商格式转换后**实际发出**的请求和服务商**原样返回**的响应（`llm.<服务商>.*` 这些键），排查参数转换、看服务商自己的 token 明细时有用。它不带模型、token 和费用，不会重复计费；传了 `generation_name` 时两条记录同名。
+
+**不需要子记录**：`.env` 里设 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=false`，重新执行 `./deploy.sh`，之后每次调用只留 `litellm_request` 一条记录。实测 `litellm_request` 的 input/output、思维链、token、费用、元数据都不受影响（普通、流式、失败、带 tools 的请求和 `/v1/messages` 都验证过）。留空是 LiteLLM 默认，生成子记录。这是 OpenTelemetry 的标准变量，其他取值（`SPAN_ONLY` 等）没有验证过，不建议用。
+
 只想每次调用看一行：在左侧 Filters 的 Type 里只勾 `GENERATION`。只看失败的：搜索框输入 `level:ERROR`。
 
 用 API 查日志（Langfuse v4 起旧的 `/api/public/traces` 已下线，要用 v2）：
@@ -321,6 +325,7 @@ LIMIT 10
 | `MINIO_CONSOLE_PORT` | `9091` | MinIO 网页控制台 |
 | `LANGFUSE_LOG_REASONING` | `true` | 是否把模型的思维链写进 Langfuse 输出，见[思维链](#思维链) |
 | `LANGFUSE_LOG_RAW_PAYLOAD` | `false` | 是否把原始请求和响应 JSON 原样附加到 Langfuse，见[原始请求和响应 JSON](#原始请求和响应-json) |
+| `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` | 空 | `false` 时不生成 `raw_gen_ai_request` 子记录，留空为 LiteLLM 默认（生成），见[在 Langfuse 里看日志](#在-langfuse-里看日志) |
 | `COMPOSE_PROJECT_NAME` | `llm-gateway` | 容器和数据卷的名字前缀；同一台机器部署多套时，每套用不同的值和端口 |
 | `*_IMAGE` | 见 `.env.example` | 替换镜像地址，用于镜像加速或内网仓库 |
 
@@ -392,5 +397,6 @@ rm .env CREDENTIALS.md
 - 重复执行 `deploy.sh` 不会改动已有的 `.env`
 - 思维链开关：开启时非流式、流式请求的思维链都写进 Langfuse 输出，关闭时都不写；从旧版本升级时自动补上开关
 - 原始报文开关：默认关闭；打开后原始请求和响应原样附加到 Langfuse，自检脚本能确认写入；从旧版本升级时自动补上开关（默认关闭）
+- 子记录开关：`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=false` 时普通、流式、失败、带 tools 的请求和 `/v1/messages` 都不再生成 `raw_gen_ai_request`，`litellm_request` 的元数据键与默认时完全一致；自检脚本能确认子记录没有生成；从旧版本升级时自动补上配置项（留空，行为不变）
 
 **Linux 服务器上尚未实测。**脚本只用了 bash、curl、awk、openssl（没有时退回 `/dev/urandom`）这些常见工具，按理可以直接运行；第一次在 Linux 上部署时请留意输出。

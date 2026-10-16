@@ -106,5 +106,22 @@ case "$(printf '%s' "${LANGFUSE_LOG_RAW_PAYLOAD:-false}" | tr '[:upper:]' '[:low
     ;;
 esac
 
+# raw_gen_ai_request 子记录：设为不生成时，确认这条 trace 下确实没有（子记录可能比主记录晚到，多查几次）
+case "$(printf '%s' "${OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT:-}" | tr '[:upper:]' '[:lower:]')" in
+  false | 0 | no_content)
+    for _ in 1 2 3; do
+      all_obs=$(curl -s --max-time 15 -u "$LF_AUTH" \
+        "${LANGFUSE}/api/public/v2/observations?traceId=${trace_id}&fields=core,basic" || true)
+      grep -q '"name":"raw_gen_ai_request"' <<<"$all_obs" &&
+        fail "已设为不生成，但 Langfuse 里仍有 raw_gen_ai_request 子记录（确认网关容器已按新的 .env 重建）"
+      sleep 2
+    done
+    ok "没有生成 raw_gen_ai_request 子记录（OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=${OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT}）"
+    ;;
+  *)
+    printf '[--]   raw_gen_ai_request 子记录按 LiteLLM 默认生成，跳过检查\n'
+    ;;
+esac
+
 printf '\n全部通过。在界面里查看这条记录:\n  http://%s:%s/project/%s/traces/%s\n' \
   "${PUBLIC_HOST:-localhost}" "${LANGFUSE_PORT:-3000}" "${LANGFUSE_INIT_PROJECT_ID}" "$trace_id"

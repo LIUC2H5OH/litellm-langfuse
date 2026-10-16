@@ -81,6 +81,9 @@ services:
       LANGFUSE_LOG_REASONING: ${LANGFUSE_LOG_REASONING:-true}
       # 是否把原始请求和响应 JSON 原样附加到 Langfuse（litellm/langfuse_raw_payload.py），在 .env 里改
       LANGFUSE_LOG_RAW_PAYLOAD: ${LANGFUSE_LOG_RAW_PAYLOAD:-false}
+      # 是否生成 raw_gen_ai_request 子记录（发给模型服务商的原始请求和响应），在 .env 里改：
+      # false 不生成，留空为 LiteLLM 默认（生成）。不影响 litellm_request 记录的 input/output
+      OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: ${OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=3)"]
       interval: 10s

@@ -85,6 +85,8 @@ ensure_feature_switches() {
     printf '\n# ---------- 功能开关 ----------\n# 是否把模型的思维链（reasoning_content）写进 Langfuse 的输出：true 开启，false 关闭。\n# 改完重新执行 ./deploy.sh 生效。\nLANGFUSE_LOG_REASONING=true\n' >>.env
   grep -q '^LANGFUSE_LOG_RAW_PAYLOAD=' .env ||
     printf '# 是否把原始请求和响应 JSON 原样（不截断）附加到 Langfuse：true 开启，false 关闭（默认）。\n# 原始请求里有完整请求头和 key 的鉴权信息。改完重新执行 ./deploy.sh 生效。\nLANGFUSE_LOG_RAW_PAYLOAD=false\n' >>.env
+  grep -q '^OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=' .env ||
+    printf '# 是否生成 raw_gen_ai_request 子记录（发给模型服务商的原始请求和响应）：false 不生成，留空为 LiteLLM 默认（生成）。\n# 不影响 litellm_request 记录的 input/output。改完重新执行 ./deploy.sh 生效。\nOTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=\n' >>.env
 }
 
 # ------------------------------------------------------------------ 生成 .env
@@ -341,6 +343,12 @@ else
   warn "没有找到 curl，跳过自检"
 fi
 
+case "$(printf '%s' "${OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT:-}" | tr '[:upper:]' '[:lower:]')" in
+  false | 0 | no_content) raw_span_state="不生成" ;;
+  '') raw_span_state="生成（LiteLLM 默认）" ;;
+  *) raw_span_state="${OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT}" ;;
+esac
+
 cat <<EOF
 
 部署完成。
@@ -350,6 +358,7 @@ cat <<EOF
   中间件调试端口:   PostgreSQL ${POSTGRES_PORT}、ClickHouse ${CLICKHOUSE_HTTP_PORT}/${CLICKHOUSE_NATIVE_PORT}、Redis ${REDIS_PORT}、MinIO 控制台 ${MINIO_CONSOLE_PORT}
   思维链写入 Langfuse: ${LANGFUSE_LOG_REASONING}（.env 里的 LANGFUSE_LOG_REASONING）
   原始报文写入 Langfuse: ${LANGFUSE_LOG_RAW_PAYLOAD}（.env 里的 LANGFUSE_LOG_RAW_PAYLOAD）
+  原始请求子记录:   ${raw_span_state}（.env 里的 OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT）
   账号密码:         $(pwd)/CREDENTIALS.md
 
 下一步：在网关管理界面 Models + Endpoints 里添加你自己的模型，之后经网关的调用都会出现在 Langfuse 里。
